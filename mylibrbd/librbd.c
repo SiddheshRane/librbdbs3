@@ -231,6 +231,9 @@ int rbd_aio_create_completion(void *cb_arg, rbd_callback_t complete_cb,
   AioCompletion *completion = malloc(sizeof(AioCompletion));
   completion->cb_arg = cb_arg;
   completion->complete_cb = complete_cb;
+  completion->buf = NULL;
+  completion->iov = NULL;
+  completion->iovcnt = 0;
   *c = completion;
   return 0;
 }
