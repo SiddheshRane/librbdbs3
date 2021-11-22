@@ -12,10 +12,10 @@ cd bs3
 go build -buildmode c-archive -o libbs3.a main.go
 cd ..
 
-echo "Building librbd.so app"
+echo "Building librbd.so"
 cd mylibrbd
 #gcc librbd.c  -L../bs3/ -lbs3 -lpthread -o ../rbdtestapp   #Use this for the app version used for testing
 gcc -shared -fPIC  librbd.c  -L../bs3/ -lbs3 -lpthread -o librbd.so
 cd ..
 
-echo executable is available rbdtestapp
+echo "librbd.so is available in mylibrbd folder"

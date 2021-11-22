@@ -2,13 +2,13 @@
 
 #include "librbd.h"
 #include "../bs3/libbs3.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <errno.h>
 
 void rbd_version(int *major, int *minor, int *extra) {
   *major = LIBRBD_VER_MAJOR;
@@ -108,18 +108,6 @@ void go_aio_read_complete(AioCompletion *completion) {
   // completion gets freed after user callback
 }
 
-// Called from Go code when it has completed an async write operation.
-void go_aio_write_complete(AioCompletion *completion) {
-  printf("go_aio_write_complete\n");
-  if (completion->iovcnt > 0) {
-    // For writev, release the temp buffer
-    free(completion->buf);
-  }
-  // Call user callback
-  completion->complete_cb(completion, completion->cb_arg);
-  // completion gets freed after user callback
-}
-
 ssize_t rbd_read(rbd_image_t image, uint64_t ofs, size_t len, char *buf) {
   rbd_completion_t completion;
   rbd_aio_create_completion(NULL, ignore_completion_callback, &completion);
@@ -161,6 +149,20 @@ int rbd_aio_readv(rbd_image_t image, const struct iovec *iov, int iovcnt,
   completion->buf = buf;
 
   return 0;
+}
+
+// Called from Go code when it has completed an async write operation.
+void go_aio_write_complete(AioCompletion *completion) {
+  printf("go_aio_write_complete\n");
+  if (completion->iovcnt > 0) {
+    // For writev, release the temp buffer
+    free(completion->buf);
+  }
+  // Call user callback
+  printf("Calling user callback\n");
+  completion->complete_cb(completion, completion->cb_arg);
+  printf("calling user callback finished\n");
+  // completion gets freed after user callback
 }
 
 ssize_t rbd_write(rbd_image_t image, uint64_t ofs, size_t len,
@@ -212,14 +214,25 @@ int rbd_aio_discard(rbd_image_t image, uint64_t off, uint64_t len,
 int rbd_aio_write_zeroes(rbd_image_t image, uint64_t off, size_t len,
                          rbd_completion_t c, int zero_flags, int op_flags) {
   AioCompletion *completion = (AioCompletion *)c;
-  void* zeros = malloc(len);
+  void *zeros = malloc(len);
   bzero(zeros, len);
-  //Force callback to free our buffer
+  // Force callback to free our buffer
   completion->buf = zeros;
   completion->iovcnt = 1;
 
   return rbd_aio_write(image, off, len, zeros, c);
 }
+
+/*
+ * Cache operations
+ */
+
+int rbd_aio_flush(rbd_image_t image, rbd_completion_t c) {
+  AioCompletion *completion = (AioCompletion *)c;
+  completion->complete_cb(c, completion->cb_arg);
+  return 0;
+}
+int rbd_invalidate_cache(rbd_image_t image) { return 0; }
 
 /*
  * AIO completion functions

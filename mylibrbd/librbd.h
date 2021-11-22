@@ -259,7 +259,23 @@ CEPH_RBD_API int rbd_aio_discard(rbd_image_t image, uint64_t off, uint64_t len,
 CEPH_RBD_API int rbd_aio_write_zeroes(rbd_image_t image, uint64_t off,
                                       size_t len, rbd_completion_t c,
                                       int zero_flags, int op_flags);
+/**
+ * Start a flush if caching is enabled. Get a callback when
+ * the currently pending writes are on disk.
+ *
+ * @param image the image to flush writes to
+ * @param c what to call when flushing is complete
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RBD_API int rbd_aio_flush(rbd_image_t image, rbd_completion_t c);
 
+/**
+ * Drop any cached data for an image
+ *
+ * @param image the image to invalidate cached data for
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RBD_API int rbd_invalidate_cache(rbd_image_t image);
 
 CEPH_RBD_API int rbd_aio_create_completion(void *cb_arg,
                                            rbd_callback_t complete_cb,
