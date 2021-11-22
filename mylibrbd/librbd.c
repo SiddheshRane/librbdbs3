@@ -291,11 +291,7 @@ void go_dummy_callback(AioCompletion *c) {
   puts("Go called the dummy callback.");
 }
 
-void main() {
-  puts("====Test: Fetch simple return values from Go code\n");
-  rbd_image_info_t info;
-  rbd_stat(NULL, &info, sizeof info);
-  printf("disk size: %lu block size: %lu\n", info.size, info.obj_size);
+static void main() {
 
   printf("====Test: Pass args to Go, print them and modify a buffer\n");
   char buf[] = "This is a string";

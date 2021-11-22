@@ -84,12 +84,15 @@ var buseReadWriter *bs3.Bs3
 func bs3Open() int {
 	//read config
 	config.Configure()
+	loggerSetup(config.Cfg.Log.Pretty, config.Cfg.Log.Level)
+	fmt.Println("Connecting to ", config.Cfg.S3.Remote, " with accesss key ", config.Cfg.S3.AccessKey, " and secret ", config.Cfg.S3.SecretKey)
 	//use name as bucket
 	// config.Cfg.S3.Bucket = name
 
 	var err error
 	buseReadWriter, err = bs3.NewWithDefaults()
 	if err != nil {
+		fmt.Println("bs3Open failed: ", err)
 		return -1
 	}
 
@@ -100,7 +103,6 @@ func bs3Open() int {
 
 //export bs3Close
 func bs3Close() int {
-	//name is irrelevant here because right now we only allow 1 instance
 	if buseReadWriter != nil {
 		buseReadWriter.BusePostRemove()
 		buseReadWriter = nil
@@ -115,7 +117,6 @@ func bs3Flush() {
 
 //export bs3Stat
 func bs3Stat() (disk_size, block_size uint64) {
-	config.Configure() //for testing
 	disk_size = uint64(config.Cfg.Size)
 	block_size = uint64(config.Cfg.BlockSize)
 	return
