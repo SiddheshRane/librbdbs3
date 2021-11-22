@@ -28,6 +28,7 @@ package main
 //#include "../mylibrbd/librbd.h"
 //extern void go_dummy_callback(AioCompletion* c);
 //extern void go_aio_read_complete(AioCompletion*);
+//extern void go_aio_write_complete(AioCompletion*);
 //#cgo LDFLAGS: -Wl,-unresolved-symbols=ignore-in-object-files
 import "C"
 
@@ -73,14 +74,18 @@ func loggerSetup(pretty bool, level int) {
 	zerolog.SetGlobalLevel(zerolog.Level(level))
 }
 
-var buseReadWriter buse.BuseReadWriter
+/*
+ * C-Go interface functions
+ */
+
+var buseReadWriter *bs3.Bs3
 
 //export bs3Open
-func bs3Open(name string) int {
+func bs3Open() int {
 	//read config
 	config.Configure()
 	//use name as bucket
-	config.Cfg.S3.Bucket = name
+	// config.Cfg.S3.Bucket = name
 
 	var err error
 	buseReadWriter, err = bs3.NewWithDefaults()
@@ -94,7 +99,7 @@ func bs3Open(name string) int {
 }
 
 //export bs3Close
-func bs3Close(name string) int {
+func bs3Close() int {
 	//name is irrelevant here because right now we only allow 1 instance
 	if buseReadWriter != nil {
 		buseReadWriter.BusePostRemove()
@@ -104,7 +109,7 @@ func bs3Close(name string) int {
 }
 
 //export bs3Flush
-func bs3Flush(name string) {
+func bs3Flush() {
 	//we should expose bs3.checkpoint as that seems to be doing what this operation requests
 }
 
@@ -119,9 +124,29 @@ func bs3Stat() (disk_size, block_size uint64) {
 //export bs3Read
 func bs3Read(offset, length int64, buffer []byte, completion *C.AioCompletion) {
 	//convert offset to sector
-	sector := offset / int64(config.Cfg.BlockSize)
-	buseReadWriter.BuseRead(sector, length, buffer)
-	C.go_aio_read_complete(completion)
+	block_size := int64(config.Cfg.BlockSize)
+	sector := offset / block_size
+	blocks := (length + (block_size - 1)) / block_size
+
+	go func() {
+		buseReadWriter.BuseRead(sector, blocks, buffer)
+		completion.return_value = C.long(length)
+		C.go_aio_read_complete(completion)
+	}()
+}
+
+//export bs3Write
+func bs3Write(offset, length int64, buffer []byte, completion *C.AioCompletion) {
+	//convert offset to sector
+	block_size := int64(config.Cfg.BlockSize)
+	sector := offset / block_size
+	blocks := (length + (block_size - 1)) / block_size
+
+	go func() {
+		buseReadWriter.WriteSingle(sector, blocks, buffer)
+		completion.return_value = C.long(length)
+		C.go_aio_write_complete(completion)
+	}()
 }
 
 /*

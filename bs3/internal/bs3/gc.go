@@ -32,7 +32,7 @@ const (
 // Select objects viable for threshold GC. When an object utilization is under
 // the threshold it is selected for GC. The object with the highest key is
 // never collected because of oscilation.
-func (b *bs3) filterKeysToCollect(utilization map[int64]int64, ratio float64) map[int64]struct{} {
+func (b *Bs3) filterKeysToCollect(utilization map[int64]int64, ratio float64) map[int64]struct{} {
 	var maxKey int64
 	collect := make(map[int64]struct{})
 
@@ -56,7 +56,7 @@ func (b *bs3) filterKeysToCollect(utilization map[int64]int64, ratio float64) ma
 }
 
 // Constructs the list of life extents to be saved from objects subjected to the GC.
-func (b *bs3) getCompleteWriteList(keys map[int64]struct{}, stepSize int64) []mapproxy.ExtentWithObjectPart {
+func (b *Bs3) getCompleteWriteList(keys map[int64]struct{}, stepSize int64) []mapproxy.ExtentWithObjectPart {
 	completeWriteList := make([]mapproxy.ExtentWithObjectPart, 0, 128)
 
 	sectors := config.Cfg.Size / int64(config.Cfg.BlockSize)
@@ -76,7 +76,7 @@ func (b *bs3) getCompleteWriteList(keys map[int64]struct{}, stepSize int64) []ma
 }
 
 // Removes currently downloaded objects from the list of dead objects.
-func (b *bs3) filterDownloadingObjects(deadObjects map[int64]struct{}) {
+func (b *Bs3) filterDownloadingObjects(deadObjects map[int64]struct{}) {
 	b.gcData.reflock.Lock()
 	defer b.gcData.reflock.Unlock()
 
@@ -95,7 +95,7 @@ func (b *bs3) filterDownloadingObjects(deadObjects map[int64]struct{}) {
 // Runs threshold GC. It makes all objects with live data ratio under the
 // threshold dead by copying their live data into new object. These objects are
 // deleted during the regular dead GC run.
-func (b *bs3) gcThreshold(stepSize int64, threshHold float64) {
+func (b *Bs3) gcThreshold(stepSize int64, threshHold float64) {
 	liveObjects := b.extentMapProxy.ObjectsUtilization()
 	keysToCollect := b.filterKeysToCollect(liveObjects, threshHold)
 	completeWritelist := b.getCompleteWriteList(keysToCollect, stepSize)
@@ -117,7 +117,7 @@ func (b *bs3) gcThreshold(stepSize int64, threshHold float64) {
 // The object cannot be deleted on the backend, because the sequence number
 // would be missing in the recovery process where we need continuous range of
 // keys.
-func (b *bs3) removeNonReferencedDeadObjects() {
+func (b *Bs3) removeNonReferencedDeadObjects() {
 	deadObjects := b.extentMapProxy.DeadObjects()
 	b.filterDownloadingObjects(deadObjects)
 	for k := range deadObjects {
@@ -130,7 +130,7 @@ func (b *bs3) removeNonReferencedDeadObjects() {
 }
 
 // Register SIGUSR1 as a trigger for threshold GC.
-func (b *bs3) registerSigUSR1Handler() {
+func (b *Bs3) registerSigUSR1Handler() {
 	gcChan := make(chan os.Signal, 1)
 	signal.Notify(gcChan, syscall.SIGUSR1)
 
@@ -144,7 +144,7 @@ func (b *bs3) registerSigUSR1Handler() {
 }
 
 // Dead GC infinite loop. Highly efficient hence running regularly.
-func (b *bs3) gcDead() {
+func (b *Bs3) gcDead() {
 	for {
 		time.Sleep(time.Duration(config.Cfg.GC.Wait) * time.Second)
 
@@ -172,7 +172,7 @@ func writeHeader(metadataFrontier int, g mapproxy.ExtentWithObjectPart, object [
 // Traverse the list of all extents which are going to be copied into new fresh
 // object(s). It downloads necessary parts and constructs new objects for the
 // complete list. All objects are then uploaded and map updated.
-func (b *bs3) composeObjects(writeList []mapproxy.ExtentWithObjectPart) ([][]byte, [][]mapproxy.Extent) {
+func (b *Bs3) composeObjects(writeList []mapproxy.ExtentWithObjectPart) ([][]byte, [][]mapproxy.Extent) {
 	var wg sync.WaitGroup
 
 	metadataFrontier := 0

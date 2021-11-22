@@ -35,16 +35,16 @@ const (
 	sectorUnit = 512
 )
 
-// bs3 implements BuseReadWriter interface which can be passed to the buse
+// Bs3 implements BuseReadWriter interface which can be passed to the buse
 // package. Buse package wraps the communication with the BUSE kernel module
 // and does all the necessary configuration and low level operations.
 //
-// bs3 uses s3 protocol to communicate with the storage backend (most probably
+// Bs3 uses s3 protocol to communicate with the storage backend (most probably
 // aws s3) but it can be anything else. It manages the mapping between local
 // device and remote backend and performs all the operations for correct
 // functionality. The default structure is sectormap but it can be changed
 // trivially.
-type bs3 struct {
+type Bs3 struct {
 	// Proxy struct for the operations on objects like uploads, downloads
 	// etc. Proxy structs are used for serialization and prioritization of
 	// requests.
@@ -77,7 +77,7 @@ type bs3 struct {
 
 // Returns bs3 with default configuration, i.e. with s3 as a communication
 // protocol and sectormap as an extent map.
-func NewWithDefaults() (*bs3, error) {
+func NewWithDefaults() (*Bs3, error) {
 	s3Handler, err := s3.New(s3.Options{
 		Remote:    config.Cfg.S3.Remote,
 		Region:    config.Cfg.S3.Region,
@@ -99,8 +99,8 @@ func NewWithDefaults() (*bs3, error) {
 // Returns bs3 with provided protocol for communication with backend storage
 // and extentMap for keeping the mapping between local device and remote
 // backend.
-func New(objectStore objproxy.ObjectUploadDownloaderAt, extentMap mapproxy.ExtentMapper) *bs3 {
-	bs3 := bs3{
+func New(objectStore objproxy.ObjectUploadDownloaderAt, extentMap mapproxy.ExtentMapper) *Bs3 {
+	bs3 := Bs3{
 		objectStoreProxy: objproxy.New(
 			objectStore, config.Cfg.S3.Uploaders, config.Cfg.S3.Downloaders,
 			time.Duration(config.Cfg.GC.IdleTimeoutMs)*time.Millisecond),
@@ -127,7 +127,7 @@ func New(objectStore objproxy.ObjectUploadDownloaderAt, extentMap mapproxy.Exten
 // to update the mapping. Before we actually do that, we wait until the whole
 // chunk us uploaded with generated key, which is just one more than the
 // previous one.
-func (b *bs3) BuseWrite(writes int64, chunk []byte) error {
+func (b *Bs3) BuseWrite(writes int64, chunk []byte) error {
 	key := key.Next()
 
 	metadata := chunk[:b.metadata_size]
@@ -170,10 +170,50 @@ func (b *bs3) BuseWrite(writes int64, chunk []byte) error {
 	return nil
 }
 
+//Like BuseWrite for just 1 write but with metadata separate from data
+func (b *Bs3) WriteSingle(Sector, Length int64, data []byte) {
+	key := key.Next()
+
+	extents := [1]mapproxy.Extent{}
+	extents[0].Sector = Sector
+	extents[0].Length = Length
+	extents[0].SeqNo = key //We dont keep track of SeqNo anywhere so we will simply use object sequence numbers
+	extents[0].Flag = 0
+
+	blockSize := uint64(config.Cfg.BlockSize)
+	dataSize := uint64(Length) * blockSize
+	metadataSize := uint64(b.metadata_size)
+
+	object := make([]byte, metadataSize+dataSize)
+	//write extent to metadata section
+	binary.LittleEndian.PutUint64(object[:8], uint64(extents[0].Sector))
+	binary.LittleEndian.PutUint64(object[8:16], uint64(extents[0].Length))
+	binary.LittleEndian.PutUint64(object[16:24], uint64(extents[0].SeqNo))
+	//copy data to object's data portion
+	copy(object[metadataSize:], data)
+
+	// Some s3 backends, like minio just drops connection when they are
+	// under load. Hence the loop with exponential backoff till the
+	// operation succeeds. There is no point to return error, since the
+	// best thing we can do is to try infinitely and print a message to
+	// log.
+	for i := 1; ; i *= 2 {
+		err := b.objectStoreProxy.Upload(key, object, true)
+		if err == nil {
+			break
+		}
+		log.Info().Err(err).Send()
+		time.Sleep(time.Duration(i) * time.Second)
+	}
+
+	b.extentMapProxy.Update(extents[:], int64(b.metadata_size/config.Cfg.BlockSize), key)
+
+}
+
 // Download part of the object to the memory buffer chunk. The part is
 // specified by part and it is necessary to call wg.Done() when the upload is
 // finished.
-func (b *bs3) downloadObjectPart(part mapproxy.ObjectPart, chunk []byte, wg *sync.WaitGroup) {
+func (b *Bs3) downloadObjectPart(part mapproxy.ObjectPart, chunk []byte, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	// Some s3 backends, like minio just drops connection when they are
@@ -195,7 +235,7 @@ func (b *bs3) downloadObjectPart(part mapproxy.ObjectPart, chunk []byte, wg *syn
 // Length of the chunk is the same as length variable. This function consults
 // the extent map and asynchronously downloads all needed pieces to reconstruct
 // the logical extent.
-func (b *bs3) BuseRead(sector, length int64, chunk []byte) error {
+func (b *Bs3) BuseRead(sector, length int64, chunk []byte) error {
 	objectPieces := b.getObjectPiecesRefCounterInc(sector, length)
 
 	var wg sync.WaitGroup
@@ -221,7 +261,7 @@ func (b *bs3) BuseRead(sector, length int64, chunk []byte) error {
 // collection deleting just completely dead objects withou any data. It is very
 // fast and efficiet and has a huge impact on the backend space utilization.
 // Hence we run it continuously.
-func (b *bs3) BusePreRun() {
+func (b *Bs3) BusePreRun() {
 	if !config.Cfg.SkipCheckpoint {
 		b.restore()
 	}
@@ -234,7 +274,7 @@ func (b *bs3) BusePreRun() {
 // After disconnecting from the kernel module and just before shuting the
 // daemon down we save the map to the backend so it can be restored during next
 // start and mapping is not lost.
-func (b *bs3) BusePostRemove() {
+func (b *Bs3) BusePostRemove() {
 	if !config.Cfg.SkipCheckpoint {
 		b.checkpoint()
 	}
@@ -243,7 +283,7 @@ func (b *bs3) BusePostRemove() {
 // Returns object pieces for reconstructing logical extent but before that
 // safely increments the refcounter for the objects. Objects in refcounter are
 // excluded from garbage collection.
-func (b *bs3) getObjectPiecesRefCounterInc(sector, length int64) []mapproxy.ObjectPart {
+func (b *Bs3) getObjectPiecesRefCounterInc(sector, length int64) []mapproxy.ObjectPart {
 	b.gcData.reflock.Lock()
 	defer b.gcData.reflock.Unlock()
 
@@ -258,7 +298,7 @@ func (b *bs3) getObjectPiecesRefCounterInc(sector, length int64) []mapproxy.Obje
 
 // Decrements the refcounter for the object pieces. Objects in refcounter are
 // excluded from garbage collection.
-func (b *bs3) objectPiecesRefCounterDec(objectPieces []mapproxy.ObjectPart) {
+func (b *Bs3) objectPiecesRefCounterDec(objectPieces []mapproxy.ObjectPart) {
 	b.gcData.reflock.Lock()
 
 	for _, op := range objectPieces {
@@ -270,7 +310,7 @@ func (b *bs3) objectPiecesRefCounterDec(objectPieces []mapproxy.ObjectPart) {
 
 // Restores the map from the checkpoint saved on the backend and updates the
 // current object key accordingly. If it exists.
-func (b *bs3) restoreFromCheckpoint() {
+func (b *Bs3) restoreFromCheckpoint() {
 	mapSize, err := b.objectStoreProxy.Instance.GetObjectSize(checkpointKey)
 	if err == nil {
 		log.Info().Msg("->Checkpoint found. Checkpoint recovery started.")
@@ -288,7 +328,7 @@ func (b *bs3) restoreFromCheckpoint() {
 // all the writes from metadata part of continuous sequence of objects until a
 // missing object is found. This is the point where prefix consistency is
 // corrupted and we cannot recover more. Any successive objects are deleted.
-func (b *bs3) restoreFromObjects() {
+func (b *Bs3) restoreFromObjects() {
 	log.Info().Msg("->Looking for objects to do roll forward recovery.")
 
 	keyBefore := key.Current()
@@ -325,7 +365,7 @@ func (b *bs3) restoreFromObjects() {
 			extents = append(extents, e)
 			header = header[b.write_item_size:]
 		}
-
+		//NOTE: This line forces us to keep metadata size to atleast 1 BlockSize
 		dataBegin := int64(b.metadata_size / config.Cfg.BlockSize)
 		b.extentMapProxy.Update(extents, dataBegin, key.Current())
 	}
@@ -341,7 +381,7 @@ func (b *bs3) restoreFromObjects() {
 // individual objects. E.g. when crash happens, checkpoint is not uploaded
 // hence the old checkpoint is read. However there can already be uploaded new
 // set of objects fulfilling prefix consistency.
-func (b *bs3) restore() {
+func (b *Bs3) restore() {
 	log.Info().Msgf("Checking for old volume in bucket %s.", config.Cfg.S3.Bucket)
 
 	b.restoreFromCheckpoint()
@@ -356,7 +396,7 @@ func (b *bs3) restore() {
 }
 
 // Serializes extent map and upload it to the backend.
-func (b *bs3) checkpoint() {
+func (b *Bs3) checkpoint() {
 	log.Info().Msg("Checkpointing started.")
 
 	log.Info().Msg("->Serialization of extent map started.")

@@ -1,11 +1,14 @@
-//Author: Siddhesh Rane <rane.si@northeastern.edu>
+// Author: Siddhesh Rane <rane.si@northeastern.edu>
 
 #include "librbd.h"
 #include "../bs3/libbs3.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
 
 void rbd_version(int *major, int *minor, int *extra) {
   *major = LIBRBD_VER_MAJOR;
@@ -34,14 +37,16 @@ int rbd_remove(rados_ioctx_t io, const char *name) {
 
 int rbd_open(rados_ioctx_t io, const char *name, rbd_image_t *image,
              const char *snap_name) {
-
-  // Call bs3Open in go code
-  return 0;
+  int ret = bs3Open();
+  if (ret < 0)
+    return ret;
+  *image = (void *)0xCAFEBABE;
+  return ret;
 }
 
 int rbd_close(rbd_image_t image) {
   // Call bs3Close in go code
-  return 0;
+  return bs3Close();
 }
 
 int rbd_stat(rbd_image_t image, rbd_image_info_t *info, size_t infosize) {
@@ -53,7 +58,6 @@ int rbd_stat(rbd_image_t image, rbd_image_info_t *info, size_t infosize) {
   info->size = ret.r0;
   info->obj_size = ret.r1;
 
-  // Can also get this from bs3Stat
   return 0;
 }
 
@@ -73,21 +77,47 @@ int rbd_resize(rbd_image_t image, uint64_t size) {
  * Read/Write functions
  */
 
-static void copyToIov(void* buf, const struct iovec* iov, int iovcnt){
-  //TODO: perform the copy
+// Copy data from buf to the scattered buffers in iov
+static void copyToIov(void *buf, const struct iovec *iov, int iovcnt) {
+  for (int i = 0; i < iovcnt; i++) {
+    memcpy(iov[i].iov_base, buf, iov[i].iov_len);
+    buf += iov[i].iov_len;
+  }
+}
+
+// copy from the scattered buffers in iov into contiguous buffer buf
+static void copyFromIov(void *buf, const struct iovec *iov, int iovcnt) {
+  for (int i = 0; i < iovcnt; i++) {
+    memcpy(buf, iov[i].iov_base, iov[i].iov_len);
+    buf += iov[i].iov_len;
+  }
 }
 
 void ignore_completion_callback(rbd_completion_t cb, void *arg) {}
 
-// Called from Go code when it has completed an async read/write operation.
+// Called from Go code when it has completed an async read operation.
 void go_aio_read_complete(AioCompletion *completion) {
-  printf("go_aio_complete called\n");
-  if (completion->iovcnt > 0) { //For readv, copy from temp buf to user provided iov buffers
+  printf("go_aio_read_complete\n");
+  if (completion->iovcnt > 0) {
+    // For readv, copy from temp buf to user provided iov buffers
     copyToIov(completion->buf, completion->iov, completion->iovcnt);
     free(completion->buf);
   }
-  //Call user callback
+  // Call user callback
   completion->complete_cb(completion, completion->cb_arg);
+  // completion gets freed after user callback
+}
+
+// Called from Go code when it has completed an async write operation.
+void go_aio_write_complete(AioCompletion *completion) {
+  printf("go_aio_write_complete\n");
+  if (completion->iovcnt > 0) {
+    // For writev, release the temp buffer
+    free(completion->buf);
+  }
+  // Call user callback
+  completion->complete_cb(completion, completion->cb_arg);
+  // completion gets freed after user callback
 }
 
 ssize_t rbd_read(rbd_image_t image, uint64_t ofs, size_t len, char *buf) {
@@ -115,14 +145,16 @@ int rbd_aio_readv(rbd_image_t image, const struct iovec *iov, int iovcnt,
   if (iovcnt == 1) {
     return rbd_aio_read(image, off, iov[0].iov_len, iov[0].iov_base, c);
   }
-  //Go code only supports a single contiguous buffer but this function gives us scattered
-  //buffers in iov. We therefore allocate into a single buffer and then copy into iov buffers.
+  // Go code only supports a single contiguous buffer but this function gives us
+  // scattered buffers in iov. We therefore read into a contiguous buffer and
+  // then copy into iov buffers in the callback.
   size_t len = 0;
-  for(int i=0; i<iovcnt; i++) {
+  for (int i = 0; i < iovcnt; i++) {
     len += iov[i].iov_len;
   }
-  void* buf = malloc(len);
-  //indicate in the completion that buf needs to be copied into iov in the callback
+  void *buf = malloc(len);
+  // indicate in the completion that buf needs to be copied into iov in the
+  // callback
   AioCompletion *completion = (AioCompletion *)c;
   completion->iov = iov;
   completion->iovcnt = iovcnt;
@@ -131,18 +163,63 @@ int rbd_aio_readv(rbd_image_t image, const struct iovec *iov, int iovcnt,
   return 0;
 }
 
-ssize_t rbd_write(rbd_image_t image, uint64_t ofs, size_t len, const char *buf);
+ssize_t rbd_write(rbd_image_t image, uint64_t ofs, size_t len,
+                  const char *buf) {
+  rbd_completion_t completion;
+  rbd_aio_create_completion(NULL, ignore_completion_callback, &completion);
+
+  rbd_aio_write(image, ofs, len, buf, completion);
+  rbd_aio_wait_for_complete(completion);
+
+  ssize_t ret = rbd_aio_get_return_value(completion);
+  rbd_aio_release(completion);
+  return ret;
+}
 
 int rbd_aio_write(rbd_image_t image, uint64_t off, size_t len, const char *buf,
-                  rbd_completion_t c);
+                  rbd_completion_t c) {
+  AioCompletion *completion = (AioCompletion *)c;
+  GoSlice buffer = {.data = buf, .len = len, .cap = len};
+  bs3Write(off, len, buffer, completion);
+  return 0;
+}
 
 int rbd_aio_writev(rbd_image_t image, const struct iovec *iov, int iovcnt,
-                   uint64_t off, rbd_completion_t c);
+                   uint64_t off, rbd_completion_t c) {
+  if (iovcnt == 1) {
+    return rbd_aio_write(image, off, iov[0].iov_len, iov[0].iov_base, c);
+  }
+  size_t len = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    len += iov[i].iov_len;
+  }
+  void *buf = malloc(len);
+  copyFromIov(buf, iov, iovcnt);
+  AioCompletion *completion = (AioCompletion *)c;
+  completion->iovcnt = iovcnt;
+  completion->buf = buf;
+  completion->iov = iov; // not used by write callback
+  return 0;
+}
 
 int rbd_aio_discard(rbd_image_t image, uint64_t off, uint64_t len,
-                    rbd_completion_t c);
+                    rbd_completion_t c) {
+  AioCompletion *completion = (AioCompletion *)c;
+  completion->return_value = 1; // success
+  completion->complete_cb(c, completion->cb_arg);
+  return 0;
+}
 int rbd_aio_write_zeroes(rbd_image_t image, uint64_t off, size_t len,
-                         rbd_completion_t c, int zero_flags, int op_flags);
+                         rbd_completion_t c, int zero_flags, int op_flags) {
+  AioCompletion *completion = (AioCompletion *)c;
+  void* zeros = malloc(len);
+  bzero(zeros, len);
+  //Force callback to free our buffer
+  completion->buf = zeros;
+  completion->iovcnt = 1;
+
+  return rbd_aio_write(image, off, len, zeros, c);
+}
 
 /*
  * AIO completion functions
@@ -201,16 +278,16 @@ int rbd_snap_rollback(rbd_image_t image, const char *snapname) { return -1; }
 
 int rbd_encryption_format(rbd_image_t image, rbd_encryption_format_t format,
                           rbd_encryption_options_t opts, size_t opts_size) {
-  return -1;
+  return -ENOTSUP;
 }
 int rbd_encryption_load(rbd_image_t image, rbd_encryption_format_t format,
                         rbd_encryption_options_t opts, size_t opts_size) {
-  return -1;
+  return -ENOTSUP;
 }
 
 // For testing
 
-void go_dummy_callback(AioCompletion* c) {
+void go_dummy_callback(AioCompletion *c) {
   puts("Go called the dummy callback.");
 }
 
@@ -241,7 +318,8 @@ void main() {
 
   puts("====Test: Call C callback function from Go\n");
   bs3CallbackTest(NULL);
-  puts("bs3CallbackTest function returned. Wait for the callback and then press any key to exit\n");
+  puts("bs3CallbackTest function returned. Wait for the callback and then "
+       "press any key to exit\n");
 
   getchar();
 }
