@@ -223,6 +223,14 @@ int rbd_aio_write_zeroes(rbd_image_t image, uint64_t off, size_t len,
   return rbd_aio_write(image, off, len, zeros, c);
 }
 
+// Used by FIO in rbd.c function _fio_rbd_connect
+
+int rbd_flush(rbd_image_t image) {
+
+  return 0;
+}
+
+
 /*
  * Cache operations
  */
