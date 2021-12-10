@@ -259,6 +259,10 @@ CEPH_RBD_API int rbd_aio_discard(rbd_image_t image, uint64_t off, uint64_t len,
 CEPH_RBD_API int rbd_aio_write_zeroes(rbd_image_t image, uint64_t off,
                                       size_t len, rbd_completion_t c,
                                       int zero_flags, int op_flags);
+// Used by FIO
+CEPH_RBD_API int rbd_flush(rbd_image_t image);
+
+
 /**
  * Start a flush if caching is enabled. Get a callback when
  * the currently pending writes are on disk.
